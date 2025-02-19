@@ -2,6 +2,7 @@ services:
   auth:
     target: "http://localhost:9001/auth/"
     routes:
+      "/api/v1/heartbeat": []
       "/api/v1/sign-up/user": []
       "/api/v1/validate-email/user": []
       "/api/v1/sign-in/user": []
@@ -11,9 +12,12 @@ services:
     target: "http://localhost:9002/tnt"
     routes:
       "/api/v1/heartbeat": ["sys_admin"]
-      "/api/v1/tenants": ["sys_admin"]
-      "/api/v1/tenants/{id}/deactivate": ["sys_admin","admin"]
-      "/api/v1/tenants/{id}": ["sys_admin","user","admin"]
+      "/api/v1/tenants/create": ["sys_admin"]
+      "/api/v1/tenants/all": ["sys_admin"]
+      "/api/v1/tenants/deactivate/{id}": ["sys_admin","admin"]
+      "/api/v1/tenants/get/{id}": ["sys_admin"]
+      "/api/v1/tenants/update/{id}": ["sys_admin"]
+      "/api/v1/tenants/delete/{id}": ["sys_admin"]
 
   geo-track:
     target: "http://localhost:9003"
