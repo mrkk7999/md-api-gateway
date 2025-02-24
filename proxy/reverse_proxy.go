@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"fmt"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -43,6 +45,12 @@ func ReverseProxy(target string) http.Handler {
 	targetURL, err := url.Parse(target)
 	if err != nil {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log.Println("##########")
+			fmt.Println("##########")
+			log.Println(r.URL.Path)
+			fmt.Println(r.URL.Path)
+			fmt.Println("##########")
+			log.Println("##########")
 			http.Error(w, "Bad Gateway: Invalid target URL", http.StatusBadGateway)
 		})
 	}

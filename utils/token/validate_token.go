@@ -1,66 +1,94 @@
 package token
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/MicahParks/keyfunc"
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/MicahParks/keyfunc/v2"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // ExtractToken extracts JWT from the "Authorization: Bearer <token>" header
 func ExtractToken(authHeader string) string {
-	log.Println("ExtractToken: Received Authorization header:", authHeader)
-
 	parts := strings.Split(authHeader, " ")
 	if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-		log.Println("ExtractToken: Extracted token successfully")
-
 		return parts[1]
 	}
-	log.Println("ExtractToken: Failed to extract token")
-
 	return ""
 }
 
-// ValidateToken validates JWT using AWS Cognito JWKS
-func ValidateToken(tokenString string) (*jwt.MapClaims, error) {
-	log.Println("ValidateToken: Starting token validation")
+var (
+	jwks      *keyfunc.JWKS
+	jwksOnce  sync.Once
+	jwksError error
+)
 
-	awsRegion := os.Getenv("COG_REGION")
-	userPoolId := os.Getenv("COG_USER_POOL_ID")
-	jwksURL := fmt.Sprintf("https://cognito-idp.%v.amazonaws.com/%v/.well-known/jwks.json", awsRegion, userPoolId)
+// InitJWKS initializes JWKS once at startup
+func InitJWKS() {
+	jwksOnce.Do(func() {
+		awsRegion := os.Getenv("COG_REGION")
+		userPoolId := os.Getenv("COG_USER_POOL_ID")
+		jwksURL := fmt.Sprintf("https://cognito-idp.%s.amazonaws.com/%s/.well-known/jwks.json", awsRegion, userPoolId)
 
-	// jwksURL := fmt.Sprintf("https://cognito-idp.eu-north-1.amazonaws.com/eu-north-1_OIlvRiSLJ/.well-known/jwks.json")
+		jwks, jwksError = keyfunc.Get(jwksURL, keyfunc.Options{RefreshInterval: time.Hour})
+		if jwksError != nil {
+			log.Println("InitJWKS: Failed to load JWKS: %v", jwksError)
+		}
+	})
+}
 
-	// Fetch JWKS (JSON Web Key Set)
-	jwks, err := keyfunc.Get(jwksURL, keyfunc.Options{RefreshInterval: time.Hour})
-	if err != nil {
-		log.Printf("ValidateToken: Failed to fetch JWKS: %v", err)
+// TokenAuth validates JWT using Cognito (if enabled) and then JWKS
+func TokenAuth(ctx context.Context, tokenString string) (*jwt.MapClaims, error) {
+	authMode := os.Getenv("TOKEN_AUTH")
 
-		return nil, fmt.Errorf("failed to fetch JWKS: %v", err)
+	// Check with Cognito if enabled
+	if authMode == "cognito" {
+		if err := checkWithCognito(ctx, tokenString); err != nil {
+			return nil, err
+		}
 	}
 
-	// Parse and validate token
+	// Validate JWT Signature using cached JWKS
+	if jwks == nil {
+		return nil, errors.New("JWKS not initialized")
+	}
+
 	token, err := jwt.Parse(tokenString, jwks.Keyfunc)
-
 	if err != nil || !token.Valid {
-		log.Printf("ValidateToken: Token parsing failed: %v", err)
-
-		return nil, errors.New("invalid token")
+		return nil, errors.New("invalid or expired token")
 	}
-	log.Println("ValidateToken: Token is valid")
 
 	// Extract claims
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
-		return nil, errors.New("unable to extract claims")
+		return nil, errors.New("failed to extract claims")
 	}
-	log.Println("ValidateToken: Successfully extracted claims", claims)
 
 	return &claims, nil
+}
+
+// checkWithCognito verifies the token directly with AWS Cognito
+func checkWithCognito(ctx context.Context, token string) error {
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(os.Getenv("COG_REGION")))
+	if err != nil {
+		log.Println("checkWithCognito: Failed to load AWS config:", err)
+		return errors.New("internal server error")
+	}
+
+	client := cognitoidentityprovider.NewFromConfig(cfg)
+
+	_, err = client.GetUser(ctx, &cognitoidentityprovider.GetUserInput{AccessToken: &token})
+	if err != nil {
+		return errors.New("token is invalid or expired")
+	}
+
+	return nil
 }

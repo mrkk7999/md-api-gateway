@@ -1,28 +1,40 @@
 package router
 
 import (
+	"md-api-gateway/caches"
 	"md-api-gateway/middleware"
 	"md-api-gateway/proxy"
+	"md-api-gateway/utils/token"
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
 )
 
 // NewRouter sets up the API Gateway router
-func NewRouter() *mux.Router {
+func NewRouter(cache caches.Cache, log *logrus.Logger) *mux.Router {
 	r := mux.NewRouter()
-	r.Use(middleware.LoggingMiddleware)
+	r.Use(func(next http.Handler) http.Handler {
+		return middleware.LoggingMiddleware(next, log)
+	})
 
 	for _, service := range proxy.ServiceMap {
 		for route, roles := range service.Routes {
+
 			handler := createProxyHandler(route)
 
 			// Apply AuthMiddleware only if roles are defined for the route
 			if len(roles) > 0 {
-				handler = middleware.AuthMiddleware(handler).(http.HandlerFunc)
+				handler = middleware.AuthMiddleware(handler, cache).(http.HandlerFunc)
+			}
+
+			// Add specific handler for sign-out route
+			if route == "/api/v1/sign-out" {
+				r.HandleFunc(route, signOutHandler(cache)).Methods("POST")
 			}
 
 			r.HandleFunc(route, handler.ServeHTTP)
+
 		}
 	}
 
@@ -43,19 +55,30 @@ func createProxyHandler(route string) http.HandlerFunc {
 	}
 }
 
-// func NewRouter() http.Handler {
-// 	r := http.NewServeMux()
+// signOutHandler handles the sign-out route and invalidates the cache
+func signOutHandler(cache caches.Cache) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tokenString := token.ExtractToken(r.Header.Get("Authorization"))
+		if tokenString == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 
-// 	// Define routes for the API
-// 	r.Handle("/health", middleware.AuthMiddleware(http.HandlerFunc(HealthCheckHandler)))
-// 	// r.Handle("/api/v1/auth/", http.StripPrefix("/api/v1/auth", proxy.NewProxy("http://localhost:9001")))
-// 	// r.Handle("/api/v1/tenant/", middleware.AuthMiddleware(http.StripPrefix("/api/v1/tenant", proxy.NewProxy("http://localhost:9002"))))
-// 	// r.Handle("/api/v1/geo-track/", middleware.AuthMiddleware(http.StripPrefix("/api/v1/geo-track", proxy.NewProxy("http://localhost:9003"))))
-// 	// r.Handle("/api/v1/geo-stream/", middleware.AuthMiddleware(http.StripPrefix("/api/v1/geo-stream", proxy.NewProxy("http://localhost:9004"))))
+		// Invalidate the cache for the token
+		err := cache.InvalidateHash(r.Context(), tokenString)
+		if err != nil {
+			http.Error(w, "Failed to invalidate cache", http.StatusInternalServerError)
+			return
+		}
 
-// 	return r
-// }
-// func HealthCheckHandler(w http.ResponseWriter, r *http.Request) {
-// 	w.WriteHeader(http.StatusOK)
-// 	w.Write([]byte(`{"message": "Health check passed"}`))
-// }
+		// Forward the request to the actual sign-out service
+		target, found := proxy.GetServiceTarget("/api/v1/sign-out")
+		if !found {
+			http.Error(w, "Service Not Found", http.StatusNotFound)
+			return
+		}
+
+		proxyHandler := proxy.ReverseProxy(target)
+		proxyHandler.ServeHTTP(w, r)
+	}
+}

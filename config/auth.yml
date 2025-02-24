@@ -2,11 +2,21 @@ services:
   auth:
     target: "http://localhost:9001/auth/"
     routes:
+      # Public Routes
       "/api/v1/heartbeat": []
       "/api/v1/sign-up/user": []
       "/api/v1/validate-email/user": []
       "/api/v1/sign-in/user": []
+      "/api/v1/sign-out": ["user","admin","sys_admin"]
+      "/api/v1/tenant/users/all": ["sys_admin"]
+      "/api/v1/tenant/users/{id}": ["sys_admin","user","admin"]
+      "/api/v1/tenant/{id}/users": ["sys_admin","admin"]
+      "/api/v1/tenant/{id}/admins": ["sys_admin","admin"]
       "/api/v1/sign-up/sysadmin": []
+      "/api/v1/sysadmins/all": ["sys_admin"]
+      "/api/v1/sysadmins/{id}/get": ["sys_admin"]
+      "/api/v1/sysadmins/{id}/update": ["sys_admin"]
+      "/api/v1/sysadmins/{id}/delete": ["sys_admin"]
 
   tenant-management:
     target: "http://localhost:9002/tnt"

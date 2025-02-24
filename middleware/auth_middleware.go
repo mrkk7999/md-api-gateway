@@ -1,33 +1,65 @@
 package middleware
 
 import (
+	"encoding/json"
+	"md-api-gateway/caches"
 	"md-api-gateway/config"
 	"md-api-gateway/utils/token"
 	"net/http"
+	"regexp"
 	"strings"
+	"time"
 
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/golang-jwt/jwt/v5"
 )
 
+// ErrorResponse represents a structured error message
+type ErrorResponse struct {
+	Message string `json:"message"`
+}
+
 // AuthMiddleware enforces role-based access control
-func AuthMiddleware(next http.Handler) http.Handler {
+func AuthMiddleware(next http.Handler, cache caches.Cache) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tokenString := token.ExtractToken(r.Header.Get("Authorization"))
 		if tokenString == "" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			writeErrorResponse(w, http.StatusUnauthorized, "Unauthorized")
 			return
 		}
 
-		claims, err := token.ValidateToken(tokenString)
+		// Check if token is cached
+		cachedRoles, err := cache.GetHash(r.Context(), tokenString, "roles")
+		var userRoles []string
+
 		if err != nil {
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
-			return
-		}
+			// Token not found in cache, validate it
+			claims, err := token.TokenAuth(r.Context(), tokenString)
+			if err != nil {
+				writeErrorResponse(w, http.StatusUnauthorized, "Invalid token")
+				return
+			}
 
-		userRoles := getUserRoles(claims)
+			// Calculate remaining TTL based on token's expiration time
+			expirationTime := time.Unix(int64((*claims)["exp"].(float64)), 0)
+			remainingTTL := time.Until(expirationTime)
+
+			// Extract required claims
+			userRoles = getUserRoles(claims)
+
+			// Cache the token claims and roles with remaining TTL
+			claimsJSON, _ := json.Marshal(claims)
+			cache.SetHash(r.Context(), tokenString, map[string]interface{}{
+				"claims": string(claimsJSON),
+				"roles":  strings.Join(userRoles, ","),
+			})
+			cache.SetTTL(r.Context(), tokenString, remainingTTL)
+		} else {
+			// Token found in cache, unmarshal roles
+			userRoles = strings.Split(cachedRoles, ",")
+		}
 
 		if !isAuthorized(r.URL.Path, userRoles) {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+			writeErrorResponse(w, http.StatusForbidden, "Forbidden")
 			return
 		}
 
@@ -47,7 +79,6 @@ func getUserRoles(claims *jwt.MapClaims) []string {
 }
 
 func isAuthorized(path string, userRoles []string) bool {
-
 	for _, service := range config.AuthSettings.Services {
 		for route, roles := range service.Routes {
 			if matchRoute(route, path) {
@@ -59,10 +90,18 @@ func isAuthorized(path string, userRoles []string) bool {
 }
 
 func matchRoute(pattern, path string) bool {
-	if strings.HasSuffix(pattern, "/*") {
-		return strings.HasPrefix(path, strings.TrimSuffix(pattern, "/*"))
+
+	// Convert "{id}" to a regex pattern matching UUIDs or general IDs
+	patternRegex := regexp.MustCompile(`\{[^/]+\}`)
+	regexPattern := patternRegex.ReplaceAllString(pattern, `[^/]+`)
+
+	// Ensure full match
+	matched, err := regexp.MatchString("^"+regexPattern+"$", path)
+	if err != nil {
+		return false
 	}
-	return pattern == path
+
+	return matched
 }
 
 func hasRole(userRoles, allowedRoles []string) bool {
@@ -83,27 +122,7 @@ func contains(arr []string, item string) bool {
 	return false
 }
 
-// func AuthMiddleware(next http.Handler) http.Handler {
-// 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-// 		authHeader := r.Header.Get("Authorization")
-// 		if authHeader == "" {
-// 			http.Error(w, "Missing Authorization header", http.StatusUnauthorized)
-// 			return
-// 		}
-
-// 		tokenString := token.ExtractToken(authHeader)
-// 		if tokenString == "" {
-// 			http.Error(w, "Invalid Authorization header format", http.StatusUnauthorized)
-// 			return
-// 		}
-
-// 		claims, err := token.ValidateToken(tokenString)
-// 		if err != nil {
-// 			http.Error(w, "Invalid or expired token: "+err.Error(), http.StatusUnauthorized)
-// 			return
-// 		}
-// 		fmt.Println(claims)
-
-// 		next.ServeHTTP(w, r)
-// 	})
-// }
+func writeErrorResponse(w http.ResponseWriter, statusCode int, message string) {
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(ErrorResponse{Message: message})
+}
